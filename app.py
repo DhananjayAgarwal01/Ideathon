@@ -55,12 +55,17 @@ def contact():
 # ********************************** Prediction Functions **********************************
 def load_data():
     try:
-        df = pd.read_csv('static/models/ideathon_dataset.csv')
-        df['date'] = pd.to_datetime(df['date'])
-        return df
+        retail_df = pd.read_csv('static/models/ideathon_dataset.csv')
+        wholesale_df = pd.read_csv('static/models/ideathon_wholesale_dataset.csv')
+        retail_df['date'] = pd.to_datetime(retail_df['date'])
+        wholesale_df['date'] = pd.to_datetime(wholesale_df['date'])
+        return retail_df, wholesale_df
     except Exception as e:
         print(f"Error loading data: {e}")
-        return None
+        return None, None
+    
+# Initialize data
+retail_df, wholesale_df = load_data()
 
 def load_models():
     models = {}
@@ -74,16 +79,6 @@ def load_models():
 
 # Initialize models
 commodity_models = load_models()
-
-# Base prices for wholesale
-pulse_base_prices = {
-    'gram': 60,
-    'tur': 85,
-    'urad': 90,
-    'moong': 95,
-    'masur': 80
-}
-
 # ********************************** Prediction Routes **********************************
 @app.route('/predict_vegetables')
 def predict_vegetables_form():
@@ -93,6 +88,7 @@ def predict_vegetables_form():
 def predict_wholesale_form():
     return render_template('predict_wholesale.html')
 
+# Fix the predict_vegetables function - remove duplicate decorator
 @app.route('/predict_vegetables', methods=['POST'])
 def predict_vegetables():
     try:
@@ -103,54 +99,70 @@ def predict_vegetables():
         
         date = datetime.strptime(date_str, '%Y-%m-%d')
         
-        df = load_data()
-        if df is None:
+        # Get retail dataset
+        retail_df, _ = load_data()
+        if retail_df is None:
             return jsonify({'error': 'Unable to load historical data'}), 500
             
-        features = pd.DataFrame({
-    'year': [date.year],
-    'month': [date.month],
-    'week': [date.isocalendar()[1]],
-    f'lag_1_{commodity}': [df[commodity].iloc[-1]],
-    f'rolling_mean_7_{commodity}': [df[commodity].rolling(window=7).mean().iloc[-1]],
-    # Add missing features here (check model.feature_names_in_)
-})
-
-        
+        # Ensure we're using the correct model for retail prices
         try:
-            model = load('static/models/final_retailprice_prediction_model.joblib')
+            # Use the commodity-specific model from the loaded models
+            model = commodity_models.get(commodity)
+            
+            # If commodity-specific model not found, fall back to generic retail model
+            if model is None:
+                model = load('static/models/final_retailprice_prediction_model.joblib')
+                
+            # Prepare features - make sure these match what your model expects
+            features = pd.DataFrame({
+                'year': [date.year],
+                'month': [date.month],
+                'week': [date.isocalendar()[1]],
+                f'lag_1_{commodity}': [retail_df[commodity].iloc[-1]],
+                f'rolling_mean_7_{commodity}': [retail_df[commodity].rolling(window=7).mean().iloc[-1]],
+                # You may need additional features based on your model
+            })
+            
+            # Make prediction
             predicted_price = model.predict(features)[0]
             confidence = min(95, int(model.feature_importances_.mean() * 100))
             
-            historical_dates = df.tail(30)['date'].dt.strftime('%Y-%m-%d').tolist()
-            historical_prices = df[commodity].tail(30).tolist()
+            # Get historical data
+            historical_dates = retail_df.tail(30)['date'].dt.strftime('%Y-%m-%d').tolist()
+            historical_prices = retail_df[commodity].tail(30).tolist()
             
+            # Predict future prices
             future_dates = [(date + timedelta(days=i)).strftime('%Y-%m-%d') for i in range(7)]
             future_features = pd.DataFrame({
                 'year': [(date + timedelta(days=i)).year for i in range(7)],
                 'month': [(date + timedelta(days=i)).month for i in range(7)],
                 'week': [(date + timedelta(days=i)).isocalendar()[1] for i in range(7)],
-                f'lag_1_{commodity}': [df[commodity].iloc[-1]] * 7,
-                f'rolling_mean_7_{commodity}': [df[commodity].rolling(window=7).mean().iloc[-1]] * 7
+                f'lag_1_{commodity}': [retail_df[commodity].iloc[-1]] * 7,
+                f'rolling_mean_7_{commodity}': [retail_df[commodity].rolling(window=7).mean().iloc[-1]] * 7
+                # Add the same features as above
             })
             future_prices = model.predict(future_features).tolist()
             
-            avg_price = df[commodity].mean()
+            # Calculate insights
+            avg_price = retail_df[commodity].mean()
             price_trend = 'Increasing' if predicted_price > avg_price else 'Decreasing'
             volatility = 'High' if abs(predicted_price - avg_price) > avg_price * 0.2 else 'Moderate'
             
-            market_insights = f"The {commodity} prices are showing a {price_trend.lower()} trend. "
+            market_insights = f"The retail {commodity} prices are showing a {price_trend.lower()} trend. "
             market_insights += f"Price volatility is {volatility.lower()}. "
             
             total_price = predicted_price * quantity
             
             additional_insights = [
-                f"Historical average price: ₹{avg_price:.2f}/kg",
-                f"Current market trend: {price_trend}",
+                f"Historical average retail price: ₹{avg_price:.2f}/kg",
+                f"Current retail market trend: {price_trend}",
                 f"Price volatility: {volatility}",
-                f"Total price for {quantity}kg: ₹{total_price:.2f}",
+                f"Total retail price for {quantity}kg: ₹{total_price:.2f}",
                 f"Recommended action: {'Stock up' if price_trend == 'Increasing' else 'Regular purchase'}"
             ]
+            
+            # Debug message
+            print(f"RETAIL PREDICTION: {predicted_price} for {commodity}")
             
             return render_template('prediction_result.html',
                                 commodity=commodity,
@@ -168,7 +180,10 @@ def predict_vegetables():
                                 additional_insights=additional_insights)
                                 
         except Exception as e:
-            return jsonify({'error': f'Error loading model: {str(e)}'}), 500
+            import traceback
+            print(f"Error in retail prediction: {str(e)}")
+            print(traceback.format_exc())
+            return jsonify({'error': f'Error in retail prediction: {str(e)}'}), 500
             
     except Exception as e:
         return jsonify({'error': str(e)}), 500
@@ -183,54 +198,64 @@ def predict_wholesale():
         
         date = datetime.strptime(date_str, '%Y-%m-%d')
         
-        df = pd.read_csv('static/models/ideathon_wholesale_dataset.csv')  # Load wholesale dataset
-        df['date'] = pd.to_datetime(df['date'])
-        
-        if df is None:
-            return jsonify({'error': 'Unable to load historical data'}), 500
-        
-        features = pd.DataFrame({
-            'year': [date.year],
-            'month': [date.month],
-            'week': [date.isocalendar()[1]],
-            f'lag_1_{commodity}': [df[commodity].iloc[-1]],
-            f'rolling_mean_7_{commodity}': [df[commodity].rolling(window=7).mean().iloc[-1]]
-        })
+        # Get wholesale dataset
+        _, wholesale_df = load_data()
+        if wholesale_df is None:
+            return jsonify({'error': 'Unable to load wholesale data'}), 500
         
         try:
-            model = load(f'static/models/final_wholesaleprice_prediction_model.joblib')
+            # Always use the specific wholesale model
+            model = load('static/models/final_wholesaleprice_prediction_model.joblib')
+            
+            # Prepare features for wholesale prediction
+            features = pd.DataFrame({
+                'year': [date.year],
+                'month': [date.month],
+                'week': [date.isocalendar()[1]],
+                f'lag_1_{commodity}': [wholesale_df[commodity].iloc[-1]],
+                f'rolling_mean_7_{commodity}': [wholesale_df[commodity].rolling(window=7).mean().iloc[-1]]
+                # Make sure these features match what your wholesale model expects
+            })
+            
+            # Make prediction
             predicted_price = model.predict(features)[0]
             confidence = min(95, int(model.feature_importances_.mean() * 100))
             
-            historical_dates = df.tail(30)['date'].dt.strftime('%Y-%m-%d').tolist()
-            historical_prices = df[commodity].tail(30).tolist()
+            # Get historical data
+            historical_dates = wholesale_df.tail(30)['date'].dt.strftime('%Y-%m-%d').tolist()
+            historical_prices = wholesale_df[commodity].tail(30).tolist()
             
+            # Predict future prices
             future_dates = [(date + timedelta(days=i)).strftime('%Y-%m-%d') for i in range(7)]
             future_features = pd.DataFrame({
                 'year': [(date + timedelta(days=i)).year for i in range(7)],
                 'month': [(date + timedelta(days=i)).month for i in range(7)],
                 'week': [(date + timedelta(days=i)).isocalendar()[1] for i in range(7)],
-                f'lag_1_{commodity}': [df[commodity].iloc[-1]] * 7,
-                f'rolling_mean_7_{commodity}': [df[commodity].rolling(window=7).mean().iloc[-1]] * 7
+                f'lag_1_{commodity}': [wholesale_df[commodity].iloc[-1]] * 7,
+                f'rolling_mean_7_{commodity}': [wholesale_df[commodity].rolling(window=7).mean().iloc[-1]] * 7
             })
             future_prices = model.predict(future_features).tolist()
             
-            avg_price = df[commodity].mean()
+            # Calculate insights
+            avg_price = wholesale_df[commodity].mean()
             price_trend = 'Increasing' if predicted_price > avg_price else 'Decreasing'
             volatility = 'High' if abs(predicted_price - avg_price) > avg_price * 0.2 else 'Moderate'
             
-            market_insights = f"The {commodity} prices are showing a {price_trend.lower()} trend. "
+            market_insights = f"The wholesale {commodity} prices are showing a {price_trend.lower()} trend. "
             market_insights += f"Price volatility is {volatility.lower()}. "
             
             total_price = predicted_price * quantity
             
             additional_insights = [
-                f"Historical average price: ₹{avg_price:.2f}/kg",
-                f"Current market trend: {price_trend}",
+                f"Historical average wholesale price: ₹{avg_price:.2f}/kg",
+                f"Current wholesale market trend: {price_trend}",
                 f"Price volatility: {volatility}",
-                f"Total price for {quantity}kg: ₹{total_price:.2f}",
+                f"Total wholesale price for {quantity}kg: ₹{total_price:.2f}",
                 f"Recommended action: {'Stock up' if price_trend == 'Increasing' else 'Regular purchase'}"
             ]
+            
+            # Debug message
+            print(f"WHOLESALE PREDICTION: {predicted_price} for {commodity}")
             
             return render_template('prediction_result.html',
                                 commodity=commodity,
@@ -248,11 +273,13 @@ def predict_wholesale():
                                 additional_insights=additional_insights)
                                 
         except Exception as e:
-            return jsonify({'error': f'Error loading model: {str(e)}'}), 500
+            import traceback
+            print(f"Error in wholesale prediction: {str(e)}")
+            print(traceback.format_exc())
+            return jsonify({'error': f'Error in wholesale prediction: {str(e)}'}), 500
             
     except Exception as e:
         return jsonify({'error': str(e)}), 500
-
-
+    
 if __name__ == "__main__":
     app.run(debug=True)
